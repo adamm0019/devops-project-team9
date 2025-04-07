@@ -66,8 +66,7 @@ jobs:
 
       - name: Deploy to EC2 - Clone Repository
         run: |
-          ssh -i ~/.ssh/github_actions_key ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} "cd ~/app && (if [ -d 'devops-project-team9' ]; then cd devops-project-team9 && git fetch && git reset --hard origin/main; else git clone https://github.com/adamm0019/devops-project-team9.git; fi)"
-
+          ssh -i ~/.ssh/github_actions_key ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} "cd ~/app && (if [ -d 'devops-project-team9' ]; then cd devops-project-team9 && git fetch && git reset --hard origin/main; else git clone https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/adamm0019/devops-project-team9.git; fi)"
       - name: Deploy to EC2 - Install Dependencies
         run: |
           ssh -i ~/.ssh/github_actions_key ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} "sudo dnf update -y && sudo dnf install -y --skip-broken sqlite sqlite-devel zlib-devel && sudo dnf group install -y 'Development Tools' && sudo dnf install -y --skip-broken libffi-devel libxml2-devel libxslt-devel nodejs npm ncurses-devel autoconf libtool"
