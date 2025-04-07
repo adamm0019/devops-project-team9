@@ -22,15 +22,21 @@ jobs:
         uses: ruby/setup-ruby@v1
         with:
           ruby-version: 3.3.5
-          bundler-cache: true
+          # Disable bundler-cache to avoid frozen Gemfile.lock issues
+          bundler-cache: false
           working-directory: highscores-api
-          
+
+      - name: Install Dependencies
+        working-directory: highscores-api
+        run: |
+          bundle config set --local deployment false
+          bundle install
+
       - name: Run Tests
         working-directory: highscores-api
         run: |
-          bundle install
           bundle exec rspec || bundle exec rails test
-   
+
   deploy:
     needs: build-and-test-server
     runs-on: ubuntu-latest
@@ -41,16 +47,16 @@ jobs:
 
       - name: Setup SSH key
         run: |
-            mkdir -p ~/.ssh
-            echo "${{ secrets.EC2_SSH_KEY }}" > ~/.ssh/github_actions_key
-            chmod 600 ~/.ssh/github_actions_key
-            ssh-keyscan -H ${{ secrets.EC2_HOST }} >> ~/.ssh/known_hosts
+          mkdir -p ~/.ssh
+          echo "${{ secrets.EC2_SSH_KEY }}" > ~/.ssh/github_actions_key
+          chmod 600 ~/.ssh/github_actions_key
+          ssh-keyscan -H ${{ secrets.EC2_HOST }} >> ~/.ssh/known_hosts
 
       - name: Increase SSH timeout
         run: |
           echo "ServerAliveInterval 60" >> ~/.ssh/config
           echo "ServerAliveCountMax 120" >> ~/.ssh/config
-          
+
       - name: Deploy to EC2
         env:
           RAILS_MASTER_KEY: ${{ secrets.RAILS_MASTER_KEY }}
@@ -58,11 +64,11 @@ jobs:
           ssh -i ~/.ssh/github_actions_key ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} << 'ENDSSH'
             # using set +e to continue even if some commands fail
             set +e
-            
+          
             # Setup app directory
             mkdir -p ~/app
             cd ~/app
-            
+          
             # ensure the repository exists, or clone it
             if [ -d "devops-project-team9" ]; then
               cd devops-project-team9
@@ -72,31 +78,31 @@ jobs:
               git clone https://github.com/yourusername/devops-project-team9.git
               cd devops-project-team9
             fi
-            
+          
             # Navigate to the highscores-api directory
             cd highscores-api
             echo "current directory: $(pwd)"
-            
-            # Install system dependencies
+          
+            # Install system dependencies (Amazon Linux 2023 uses dnf instead of apt)
             echo "installing system dependencies..."
-            sudo apt update -y
-            sudo apt install -y build-essential git curl libssl-dev libreadline-dev 
-            sudo apt install -y zlib1g-dev sqlite3 libsqlite3-dev 
-            sudo apt install -y autoconf bison libyaml-dev libgdbm-dev libncurses5-dev automake libtool
-            sudo apt install -y libffi-dev nodejs npm libxml2-dev libxslt1-dev
-            
+            sudo dnf update -y
+            sudo dnf install -y git curl openssl-devel readline-devel 
+            sudo dnf install -y zlib-devel sqlite sqlite-devel 
+            sudo dnf install -y gcc gcc-c++ make autoconf bison libyaml-devel gdbm-devel ncurses-devel automake libtool
+            sudo dnf install -y libffi-devel nodejs npm libxml2-devel libxslt-devel
+          
             # Install rvm
             echo "installing rvm and ruby..."
             if ! command -v rvm &> /dev/null; then
-              gpg --keyserver keyserver.ubuntu.com --recv-keys 409B6B1796C275462A1703113804BB82D39DC0E3 7D2BAF1CF37B13E2069D6956105BD0E739499BDB
+              gpg2 --keyserver keyserver.ubuntu.com --recv-keys 409B6B1796C275462A1703113804BB82D39DC0E3 7D2BAF1CF37B13E2069D6956105BD0E739499BDB
               curl -sSL https://get.rvm.io | bash -s stable
             fi
-            
+          
             # Check ruby installation
             source ~/.rvm/scripts/rvm
             rvm get stable --auto-dotfiles
             rvm reload
-            
+          
             # Check if Ruby 3.3.5 is already installed
             if ! rvm list | grep -q '3.3.5'; then
               echo "Ruby 3.3.5 not found. Installing it..."
@@ -104,29 +110,29 @@ jobs:
             else
               echo "Ruby 3.3.5 is already installed."
             fi
-            
+          
             # Use Ruby 3.3.5 and set as default
             rvm use 3.3.5 --default
             ruby -v
-            
+          
             # set the master key
             echo "setting up master key..."
             echo "${RAILS_MASTER_KEY}" > config/master.key
             chmod 600 config/master.key
-            
+          
             # create needed directories
             mkdir -p db storage log tmp/pids
             chmod -R 755 .
-            
+          
             # install gems with rvm ruby
             echo "installing project dependencies..."
             gem install bundler
             bundle install --jobs=4 --retry=3 || (echo "Bundle install failed, trying again..." && bundle install)
-            
+          
             # run migrations
             echo "running database migrations"
             RAILS_ENV=production bundle exec rails db:migrate || echo "Migration failed but continuing"
-            
+          
             # create systemd service file highscores-api.service
             echo "creating systemd service file..."
             sudo rm -f /etc/systemd/system/highscores-api.service
@@ -148,46 +154,50 @@ jobs:
             sudo sh -c 'echo "" >> /etc/systemd/system/highscores-api.service'
             sudo sh -c 'echo "[Install]" >> /etc/systemd/system/highscores-api.service'
             sudo sh -c 'echo "WantedBy=multi-user.target" >> /etc/systemd/system/highscores-api.service'
-            
+          
             # create log files
             sudo touch /var/log/highscores-api.log
             sudo touch /var/log/highscores-api.error.log
             sudo chown $USER:$USER /var/log/highscores-api.*
-            
+          
             echo "Setting up nginx..."
-            sudo apt install -y nginx
-            
+            sudo dnf install -y nginx
+          
             # create nginx config file
-            sudo rm -f /etc/nginx/sites-available/highscores-api
-            sudo sh -c 'echo "server {" > /etc/nginx/sites-available/highscores-api'
-            sudo sh -c 'echo "    listen 80;" >> /etc/nginx/sites-available/highscores-api'
-            sudo sh -c 'echo "    server_name _;" >> /etc/nginx/sites-available/highscores-api'
-            sudo sh -c 'echo "" >> /etc/nginx/sites-available/highscores-api'
-            sudo sh -c 'echo "    location / {" >> /etc/nginx/sites-available/highscores-api'
-            sudo sh -c 'echo "        proxy_pass http://localhost:3000;" >> /etc/nginx/sites-available/highscores-api'
-            sudo sh -c 'echo "        proxy_set_header X-Real-IP \$remote_addr;" >> /etc/nginx/sites-available/highscores-api'
-            sudo sh -c 'echo "        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;" >> /etc/nginx/sites-available/highscores-api'
-            sudo sh -c 'echo "        proxy_set_header X-Forwarded-Proto \$scheme;" >> /etc/nginx/sites-available/highscores-api'
-            sudo sh -c 'echo "    }" >> /etc/nginx/sites-available/highscores-api'
-            sudo sh -c 'echo "}" >> /etc/nginx/sites-available/highscores-api'
-            
-            sudo ln -sf /etc/nginx/sites-available/highscores-api /etc/nginx/sites-enabled/
-            sudo rm -f /etc/nginx/sites-enabled/default
+            sudo rm -f /etc/nginx/conf.d/highscores-api.conf
+            sudo sh -c 'echo "server {" > /etc/nginx/conf.d/highscores-api.conf'
+            sudo sh -c 'echo "    listen 80;" >> /etc/nginx/conf.d/highscores-api.conf'
+            sudo sh -c 'echo "    server_name _;" >> /etc/nginx/conf.d/highscores-api.conf'
+            sudo sh -c 'echo "" >> /etc/nginx/conf.d/highscores-api.conf'
+            sudo sh -c 'echo "    location / {" >> /etc/nginx/conf.d/highscores-api.conf'
+            sudo sh -c 'echo "        proxy_pass http://localhost:3000;" >> /etc/nginx/conf.d/highscores-api.conf'
+            sudo sh -c 'echo "        proxy_set_header X-Real-IP \$remote_addr;" >> /etc/nginx/conf.d/highscores-api.conf'
+            sudo sh -c 'echo "        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;" >> /etc/nginx/conf.d/highscores-api.conf'
+            sudo sh -c 'echo "        proxy_set_header X-Forwarded-Proto \$scheme;" >> /etc/nginx/conf.d/highscores-api.conf'
+            sudo sh -c 'echo "    }" >> /etc/nginx/conf.d/highscores-api.conf'
+            sudo sh -c 'echo "}" >> /etc/nginx/conf.d/highscores-api.conf'
+          
+            # Handle Amazon Linux 2023 NGINX configuration differences
+            # Amazon Linux 2023 uses different directory structure for nginx
+            # Remove default nginx config if it exists
+            sudo rm -f /etc/nginx/default.d/*.conf
+          
+            # Restart nginx
             sudo systemctl restart nginx
-            
+          
             # reload systemd
             echo "reloading systemd..."
             sudo systemctl daemon-reload
-            
+          
             # enable and start the service
             echo "enabling service..."
             sudo systemctl enable highscores-api
-            
+          
             echo "starting service.."
             sudo systemctl restart highscores-api
             sleep 5
             sudo systemctl status highscores-api || true
-            
+          
             # if service fails, try direct start
             if ! sudo systemctl is-active --quiet highscores-api; then
               echo "service failed to start, trying manual start..."
@@ -197,6 +207,6 @@ jobs:
               RAILS_ENV=production RAILS_MASTER_KEY=${RAILS_MASTER_KEY} nohup bundle exec rails server -p 3000 -b 0.0.0.0 > ~/rails.log 2>&1 &
               echo "server started in background"
             fi
-            
+          
             echo "deployment process completed"
           ENDSSH
