@@ -54,7 +54,7 @@ jobs:
       
       # Archive the build artifacts
       - name: Archive artifacts
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: solitaire-game-windows
           path: ./publish/win-x86

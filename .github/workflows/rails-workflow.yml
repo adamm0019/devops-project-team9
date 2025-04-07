@@ -22,7 +22,6 @@ jobs:
         uses: ruby/setup-ruby@v1
         with:
           ruby-version: 3.3.5
-          # Disable bundler-cache to avoid frozen Gemfile.lock issues
           bundler-cache: false
           working-directory: highscores-api
 
@@ -57,156 +56,130 @@ jobs:
           echo "ServerAliveInterval 60" >> ~/.ssh/config
           echo "ServerAliveCountMax 120" >> ~/.ssh/config
 
-      - name: Deploy to EC2
+      - name: Deploy to EC2 - Install Git
+        run: |
+          ssh -i ~/.ssh/github_actions_key ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} "sudo dnf install -y git"
+
+      - name: Deploy to EC2 - Setup Directory
+        run: |
+          ssh -i ~/.ssh/github_actions_key ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} "mkdir -p ~/app"
+
+      - name: Deploy to EC2 - Clone Repository
+        run: |
+          ssh -i ~/.ssh/github_actions_key ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} "cd ~/app && (if [ -d 'devops-project-team9' ]; then cd devops-project-team9 && git fetch && git reset --hard origin/main; else git clone https://github.com/adamm0019/devops-project-team9.git; fi)"
+
+      - name: Deploy to EC2 - Install Dependencies
+        run: |
+          ssh -i ~/.ssh/github_actions_key ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} "sudo dnf update -y && sudo dnf install -y --skip-broken sqlite sqlite-devel zlib-devel && sudo dnf group install -y 'Development Tools' && sudo dnf install -y --skip-broken libffi-devel libxml2-devel libxslt-devel nodejs npm ncurses-devel autoconf libtool"
+
+      - name: Deploy to EC2 - Install rbenv
+        run: |
+          ssh -i ~/.ssh/github_actions_key ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} "if ! command -v rbenv &> /dev/null; then git clone https://github.com/rbenv/rbenv.git ~/.rbenv && git clone https://github.com/rbenv/ruby-build.git ~/.rbenv/plugins/ruby-build && echo 'export PATH=\"\$HOME/.rbenv/bin:\$PATH\"' >> ~/.bashrc && echo 'eval \"\$(rbenv init -)\"' >> ~/.bashrc; fi"
+
+      - name: Deploy to EC2 - Set up PATH
+        run: |
+          ssh -i ~/.ssh/github_actions_key ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} "export PATH=\"\$HOME/.rbenv/bin:\$PATH\" && eval \"\$(~/.rbenv/bin/rbenv init -)\""
+
+      - name: Deploy to EC2 - Install Ruby
+        run: |
+          ssh -i ~/.ssh/github_actions_key ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} "export PATH=\"\$HOME/.rbenv/bin:\$PATH\" && eval \"\$(~/.rbenv/bin/rbenv init -)\" && if ! ~/.rbenv/bin/rbenv versions | grep -q '3.3.5'; then ~/.rbenv/bin/rbenv install 3.3.5; fi && ~/.rbenv/bin/rbenv global 3.3.5 && echo \"Using \$(~/.rbenv/shims/ruby -v)\""
+
+      - name: Deploy to EC2 - Install Bundler
+        run: |
+          ssh -i ~/.ssh/github_actions_key ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} "export PATH=\"\$HOME/.rbenv/bin:\$PATH\" && eval \"\$(~/.rbenv/bin/rbenv init -)\" && ~/.rbenv/shims/gem install bundler"
+
+      - name: Deploy to EC2 - Setup Rails App
         env:
           RAILS_MASTER_KEY: ${{ secrets.RAILS_MASTER_KEY }}
         run: |
-          ssh -i ~/.ssh/github_actions_key ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} << 'ENDSSH'
-            # using set +e to continue even if some commands fail
-            set +e
-          
-            # Setup app directory
-            mkdir -p ~/app
-            cd ~/app
-          
-            # ensure the repository exists, or clone it
-            if [ -d "devops-project-team9" ]; then
-              cd devops-project-team9
-              git fetch
-              git reset --hard origin/main
-            else
-              git clone https://github.com/yourusername/devops-project-team9.git
-              cd devops-project-team9
-            fi
-          
-            # Navigate to the highscores-api directory
-            cd highscores-api
-            echo "current directory: $(pwd)"
-          
-            # Install system dependencies (Amazon Linux 2023 uses dnf instead of apt)
-            echo "installing system dependencies..."
-            sudo dnf update -y
-            sudo dnf install -y git curl openssl-devel readline-devel 
-            sudo dnf install -y zlib-devel sqlite sqlite-devel 
-            sudo dnf install -y gcc gcc-c++ make autoconf bison libyaml-devel gdbm-devel ncurses-devel automake libtool
-            sudo dnf install -y libffi-devel nodejs npm libxml2-devel libxslt-devel
-          
-            # Install rvm
-            echo "installing rvm and ruby..."
-            if ! command -v rvm &> /dev/null; then
-              gpg2 --keyserver keyserver.ubuntu.com --recv-keys 409B6B1796C275462A1703113804BB82D39DC0E3 7D2BAF1CF37B13E2069D6956105BD0E739499BDB
-              curl -sSL https://get.rvm.io | bash -s stable
-            fi
-          
-            # Check ruby installation
-            source ~/.rvm/scripts/rvm
-            rvm get stable --auto-dotfiles
-            rvm reload
-          
-            # Check if Ruby 3.3.5 is already installed
-            if ! rvm list | grep -q '3.3.5'; then
-              echo "Ruby 3.3.5 not found. Installing it..."
-              rvm install 3.3.5
-            else
-              echo "Ruby 3.3.5 is already installed."
-            fi
-          
-            # Use Ruby 3.3.5 and set as default
-            rvm use 3.3.5 --default
-            ruby -v
-          
-            # set the master key
-            echo "setting up master key..."
-            echo "${RAILS_MASTER_KEY}" > config/master.key
-            chmod 600 config/master.key
-          
-            # create needed directories
-            mkdir -p db storage log tmp/pids
-            chmod -R 755 .
-          
-            # install gems with rvm ruby
-            echo "installing project dependencies..."
-            gem install bundler
-            bundle install --jobs=4 --retry=3 || (echo "Bundle install failed, trying again..." && bundle install)
-          
-            # run migrations
-            echo "running database migrations"
-            RAILS_ENV=production bundle exec rails db:migrate || echo "Migration failed but continuing"
-          
-            # create systemd service file highscores-api.service
-            echo "creating systemd service file..."
-            sudo rm -f /etc/systemd/system/highscores-api.service
-            sudo sh -c 'echo "[Unit]" > /etc/systemd/system/highscores-api.service'
-            sudo sh -c 'echo "Description=Highscores Rails API" >> /etc/systemd/system/highscores-api.service'
-            sudo sh -c 'echo "After=network.target" >> /etc/systemd/system/highscores-api.service'
-            sudo sh -c 'echo "" >> /etc/systemd/system/highscores-api.service'
-            sudo sh -c 'echo "[Service]" >> /etc/systemd/system/highscores-api.service'
-            sudo sh -c 'echo "Type=simple" >> /etc/systemd/system/highscores-api.service'
-            sudo sh -c 'echo "User='$USER'" >> /etc/systemd/system/highscores-api.service'
-            sudo sh -c 'echo "WorkingDirectory='$PWD'" >> /etc/systemd/system/highscores-api.service'
-            sudo sh -c 'echo "ExecStart=/bin/bash -l -c '\''source ~/.rvm/scripts/rvm && bundle exec rails server -e production -p 3000 -b 0.0.0.0'\''" >> /etc/systemd/system/highscores-api.service'
-            sudo sh -c 'echo "Restart=on-failure" >> /etc/systemd/system/highscores-api.service'
-            sudo sh -c 'echo "Environment=RAILS_ENV=production" >> /etc/systemd/system/highscores-api.service'
-            sudo sh -c 'echo "Environment=RAILS_MASTER_KEY='${RAILS_MASTER_KEY}'" >> /etc/systemd/system/highscores-api.service'
-            sudo sh -c 'echo "Environment=RAILS_SERVE_STATIC_FILES=true" >> /etc/systemd/system/highscores-api.service'
-            sudo sh -c 'echo "StandardOutput=append:/var/log/highscores-api.log" >> /etc/systemd/system/highscores-api.service'
-            sudo sh -c 'echo "StandardError=append:/var/log/highscores-api.error.log" >> /etc/systemd/system/highscores-api.service'
-            sudo sh -c 'echo "" >> /etc/systemd/system/highscores-api.service'
-            sudo sh -c 'echo "[Install]" >> /etc/systemd/system/highscores-api.service'
-            sudo sh -c 'echo "WantedBy=multi-user.target" >> /etc/systemd/system/highscores-api.service'
-          
-            # create log files
-            sudo touch /var/log/highscores-api.log
-            sudo touch /var/log/highscores-api.error.log
-            sudo chown $USER:$USER /var/log/highscores-api.*
-          
-            echo "Setting up nginx..."
-            sudo dnf install -y nginx
-          
-            # create nginx config file
-            sudo rm -f /etc/nginx/conf.d/highscores-api.conf
-            sudo sh -c 'echo "server {" > /etc/nginx/conf.d/highscores-api.conf'
-            sudo sh -c 'echo "    listen 80;" >> /etc/nginx/conf.d/highscores-api.conf'
-            sudo sh -c 'echo "    server_name _;" >> /etc/nginx/conf.d/highscores-api.conf'
-            sudo sh -c 'echo "" >> /etc/nginx/conf.d/highscores-api.conf'
-            sudo sh -c 'echo "    location / {" >> /etc/nginx/conf.d/highscores-api.conf'
-            sudo sh -c 'echo "        proxy_pass http://localhost:3000;" >> /etc/nginx/conf.d/highscores-api.conf'
-            sudo sh -c 'echo "        proxy_set_header X-Real-IP \$remote_addr;" >> /etc/nginx/conf.d/highscores-api.conf'
-            sudo sh -c 'echo "        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;" >> /etc/nginx/conf.d/highscores-api.conf'
-            sudo sh -c 'echo "        proxy_set_header X-Forwarded-Proto \$scheme;" >> /etc/nginx/conf.d/highscores-api.conf'
-            sudo sh -c 'echo "    }" >> /etc/nginx/conf.d/highscores-api.conf'
-            sudo sh -c 'echo "}" >> /etc/nginx/conf.d/highscores-api.conf'
-          
-            # Handle Amazon Linux 2023 NGINX configuration differences
-            # Amazon Linux 2023 uses different directory structure for nginx
-            # Remove default nginx config if it exists
-            sudo rm -f /etc/nginx/default.d/*.conf
-          
-            # Restart nginx
-            sudo systemctl restart nginx
-          
-            # reload systemd
-            echo "reloading systemd..."
-            sudo systemctl daemon-reload
-          
-            # enable and start the service
-            echo "enabling service..."
-            sudo systemctl enable highscores-api
-          
-            echo "starting service.."
-            sudo systemctl restart highscores-api
-            sleep 5
-            sudo systemctl status highscores-api || true
-          
-            # if service fails, try direct start
-            if ! sudo systemctl is-active --quiet highscores-api; then
-              echo "service failed to start, trying manual start..."
-              cd $PWD
-              source ~/.rvm/scripts/rvm
-              rvm use 3.3.5
-              RAILS_ENV=production RAILS_MASTER_KEY=${RAILS_MASTER_KEY} nohup bundle exec rails server -p 3000 -b 0.0.0.0 > ~/rails.log 2>&1 &
-              echo "server started in background"
-            fi
-          
-            echo "deployment process completed"
-          ENDSSH
+          ssh -i ~/.ssh/github_actions_key ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} "cd ~/app/devops-project-team9/highscores-api && mkdir -p config && echo \"$RAILS_MASTER_KEY\" > config/master.key && chmod 600 config/master.key && mkdir -p db storage log tmp/pids && chmod -R 755 ."
+
+      - name: Deploy to EC2 - Bundle Install
+        run: |
+          ssh -i ~/.ssh/github_actions_key ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} "cd ~/app/devops-project-team9/highscores-api && export PATH=\"\$HOME/.rbenv/bin:\$PATH\" && eval \"\$(~/.rbenv/bin/rbenv init -)\" && ~/.rbenv/shims/bundle install --jobs=4 --retry=3"
+
+      - name: Deploy to EC2 - Run Migrations
+        env:
+          RAILS_MASTER_KEY: ${{ secrets.RAILS_MASTER_KEY }}
+        run: |
+          ssh -i ~/.ssh/github_actions_key ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} "cd ~/app/devops-project-team9/highscores-api && export PATH=\"\$HOME/.rbenv/bin:\$PATH\" && eval \"\$(~/.rbenv/bin/rbenv init -)\" && RAILS_ENV=production RAILS_MASTER_KEY=\"$RAILS_MASTER_KEY\" ~/.rbenv/shims/bundle exec rails db:migrate || echo \"Migration failed but continuing\""
+
+      - name: Deploy to EC2 - Setup systemd service - Create file
+        run: |
+          ssh -i ~/.ssh/github_actions_key ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} "sudo rm -f /etc/systemd/system/highscores-api.service"
+
+      - name: Deploy to EC2 - Setup systemd service - Unit section
+        run: |
+          ssh -i ~/.ssh/github_actions_key ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} "sudo bash -c 'echo \"[Unit]\" > /etc/systemd/system/highscores-api.service'"
+          ssh -i ~/.ssh/github_actions_key ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} "sudo bash -c 'echo \"Description=Highscores Rails API\" >> /etc/systemd/system/highscores-api.service'"
+          ssh -i ~/.ssh/github_actions_key ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} "sudo bash -c 'echo \"After=network.target\" >> /etc/systemd/system/highscores-api.service'"
+          ssh -i ~/.ssh/github_actions_key ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} "sudo bash -c 'echo \"\" >> /etc/systemd/system/highscores-api.service'"
+
+      - name: Deploy to EC2 - Setup systemd service - Service section
+        env:
+          RAILS_MASTER_KEY: ${{ secrets.RAILS_MASTER_KEY }}
+        run: |
+          ssh -i ~/.ssh/github_actions_key ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} "sudo bash -c 'echo \"[Service]\" >> /etc/systemd/system/highscores-api.service'"
+          ssh -i ~/.ssh/github_actions_key ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} "sudo bash -c 'echo \"Type=simple\" >> /etc/systemd/system/highscores-api.service'"
+          ssh -i ~/.ssh/github_actions_key ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} "sudo bash -c 'echo \"User=${{ secrets.EC2_USER }}\" >> /etc/systemd/system/highscores-api.service'"
+          ssh -i ~/.ssh/github_actions_key ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} "sudo bash -c 'echo \"WorkingDirectory=/home/${{ secrets.EC2_USER }}/app/devops-project-team9/highscores-api\" >> /etc/systemd/system/highscores-api.service'"
+          ssh -i ~/.ssh/github_actions_key ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} "sudo bash -c 'echo \"ExecStart=/home/${{ secrets.EC2_USER }}/.rbenv/shims/bundle exec rails server -e production -p 3000 -b 0.0.0.0\" >> /etc/systemd/system/highscores-api.service'"
+          ssh -i ~/.ssh/github_actions_key ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} "sudo bash -c 'echo \"Restart=on-failure\" >> /etc/systemd/system/highscores-api.service'"
+          ssh -i ~/.ssh/github_actions_key ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} "sudo bash -c 'echo \"Environment=RAILS_ENV=production\" >> /etc/systemd/system/highscores-api.service'"
+          ssh -i ~/.ssh/github_actions_key ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} "sudo bash -c 'echo \"Environment=RAILS_MASTER_KEY=$RAILS_MASTER_KEY\" >> /etc/systemd/system/highscores-api.service'"
+          ssh -i ~/.ssh/github_actions_key ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} "sudo bash -c 'echo \"Environment=RAILS_SERVE_STATIC_FILES=true\" >> /etc/systemd/system/highscores-api.service'"
+          ssh -i ~/.ssh/github_actions_key ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} "sudo bash -c 'echo \"StandardOutput=append:/var/log/highscores-api.log\" >> /etc/systemd/system/highscores-api.service'"
+          ssh -i ~/.ssh/github_actions_key ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} "sudo bash -c 'echo \"StandardError=append:/var/log/highscores-api.error.log\" >> /etc/systemd/system/highscores-api.service'"
+          ssh -i ~/.ssh/github_actions_key ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} "sudo bash -c 'echo \"\" >> /etc/systemd/system/highscores-api.service'"
+
+      - name: Deploy to EC2 - Setup systemd service - Install section
+        run: |
+          ssh -i ~/.ssh/github_actions_key ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} "sudo bash -c 'echo \"[Install]\" >> /etc/systemd/system/highscores-api.service'"
+          ssh -i ~/.ssh/github_actions_key ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} "sudo bash -c 'echo \"WantedBy=multi-user.target\" >> /etc/systemd/system/highscores-api.service'"
+
+      - name: Deploy to EC2 - Setup log files
+        run: |
+          ssh -i ~/.ssh/github_actions_key ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} "sudo touch /var/log/highscores-api.log && sudo touch /var/log/highscores-api.error.log && sudo chown ${{ secrets.EC2_USER }}:${{ secrets.EC2_USER }} /var/log/highscores-api.*"
+
+      - name: Deploy to EC2 - Install Nginx
+        run: |
+          ssh -i ~/.ssh/github_actions_key ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} "sudo dnf install -y nginx"
+
+      - name: Deploy to EC2 - Configure Nginx - Remove old config
+        run: |
+          ssh -i ~/.ssh/github_actions_key ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} "sudo rm -f /etc/nginx/conf.d/highscores-api.conf"
+
+      - name: Deploy to EC2 - Configure Nginx - Create config
+        run: |
+          ssh -i ~/.ssh/github_actions_key ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} "sudo bash -c 'echo \"server {\" > /etc/nginx/conf.d/highscores-api.conf'"
+          ssh -i ~/.ssh/github_actions_key ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} "sudo bash -c 'echo \"    listen 80;\" >> /etc/nginx/conf.d/highscores-api.conf'"
+          ssh -i ~/.ssh/github_actions_key ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} "sudo bash -c 'echo \"    server_name _;\n\" >> /etc/nginx/conf.d/highscores-api.conf'"
+          ssh -i ~/.ssh/github_actions_key ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} "sudo bash -c 'echo \"    location / {\" >> /etc/nginx/conf.d/highscores-api.conf'"
+          ssh -i ~/.ssh/github_actions_key ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} "sudo bash -c 'echo \"        proxy_pass http://localhost:3000;\" >> /etc/nginx/conf.d/highscores-api.conf'"
+          ssh -i ~/.ssh/github_actions_key ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} "sudo bash -c 'echo \"        proxy_set_header X-Real-IP \\\$remote_addr;\" >> /etc/nginx/conf.d/highscores-api.conf'"
+          ssh -i ~/.ssh/github_actions_key ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} "sudo bash -c 'echo \"        proxy_set_header X-Forwarded-For \\\$proxy_add_x_forwarded_for;\" >> /etc/nginx/conf.d/highscores-api.conf'"
+          ssh -i ~/.ssh/github_actions_key ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} "sudo bash -c 'echo \"        proxy_set_header X-Forwarded-Proto \\\$scheme;\" >> /etc/nginx/conf.d/highscores-api.conf'"
+          ssh -i ~/.ssh/github_actions_key ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} "sudo bash -c 'echo \"    }\" >> /etc/nginx/conf.d/highscores-api.conf'"
+          ssh -i ~/.ssh/github_actions_key ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} "sudo bash -c 'echo \"}\" >> /etc/nginx/conf.d/highscores-api.conf'"
+
+      - name: Deploy to EC2 - Clean default Nginx config
+        run: |
+          ssh -i ~/.ssh/github_actions_key ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} "sudo rm -f /etc/nginx/conf.d/default.conf"
+
+      - name: Deploy to EC2 - Restart Nginx
+        run: |
+          ssh -i ~/.ssh/github_actions_key ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} "sudo systemctl restart nginx"
+
+      - name: Deploy to EC2 - Reload systemd
+        run: |
+          ssh -i ~/.ssh/github_actions_key ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} "sudo systemctl daemon-reload"
+
+      - name: Deploy to EC2 - Enable and start service
+        run: |
+          ssh -i ~/.ssh/github_actions_key ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} "sudo systemctl enable highscores-api && sudo systemctl restart highscores-api && sleep 5 && sudo systemctl status highscores-api || true"
+
+      - name: Deploy to EC2 - Manual start if needed
+        env:
+          RAILS_MASTER_KEY: ${{ secrets.RAILS_MASTER_KEY }}
+        run: |
+          ssh -i ~/.ssh/github_actions_key ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} "if ! sudo systemctl is-active --quiet highscores-api; then cd ~/app/devops-project-team9/highscores-api && export PATH=\"\$HOME/.rbenv/bin:\$PATH\" && eval \"\$(~/.rbenv/bin/rbenv init -)\" && RAILS_ENV=production RAILS_MASTER_KEY=\"$RAILS_MASTER_KEY\" nohup ~/.rbenv/shims/bundle exec rails server -p 3000 -b 0.0.0.0 > ~/rails.log 2>&1 & echo \"Server started in background\"; fi"
