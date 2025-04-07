@@ -1,0 +1,202 @@
+name: Ruby Rails CI/CD
+
+on:
+  push:
+    branches: [ "main" ]
+    paths:
+      - 'highscores-api/**'
+      - '.github/workflows/rails-workflow.yml'
+  pull_request:
+    branches: [ "main" ]
+    paths:
+      - 'highscores-api/**'
+
+jobs:
+  build-and-test-server:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: 3.3.5
+          bundler-cache: true
+          working-directory: highscores-api
+          
+      - name: Run Tests
+        working-directory: highscores-api
+        run: |
+          bundle install
+          bundle exec rspec || bundle exec rails test
+   
+  deploy:
+    needs: build-and-test-server
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup SSH key
+        run: |
+            mkdir -p ~/.ssh
+            echo "${{ secrets.EC2_SSH_KEY }}" > ~/.ssh/github_actions_key
+            chmod 600 ~/.ssh/github_actions_key
+            ssh-keyscan -H ${{ secrets.EC2_HOST }} >> ~/.ssh/known_hosts
+
+      - name: Increase SSH timeout
+        run: |
+          echo "ServerAliveInterval 60" >> ~/.ssh/config
+          echo "ServerAliveCountMax 120" >> ~/.ssh/config
+          
+      - name: Deploy to EC2
+        env:
+          RAILS_MASTER_KEY: ${{ secrets.RAILS_MASTER_KEY }}
+        run: |
+          ssh -i ~/.ssh/github_actions_key ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} << 'ENDSSH'
+            # using set +e to continue even if some commands fail
+            set +e
+            
+            # Setup app directory
+            mkdir -p ~/app
+            cd ~/app
+            
+            # ensure the repository exists, or clone it
+            if [ -d "devops-project-team9" ]; then
+              cd devops-project-team9
+              git fetch
+              git reset --hard origin/main
+            else
+              git clone https://github.com/yourusername/devops-project-team9.git
+              cd devops-project-team9
+            fi
+            
+            # Navigate to the highscores-api directory
+            cd highscores-api
+            echo "current directory: $(pwd)"
+            
+            # Install system dependencies
+            echo "installing system dependencies..."
+            sudo apt update -y
+            sudo apt install -y build-essential git curl libssl-dev libreadline-dev 
+            sudo apt install -y zlib1g-dev sqlite3 libsqlite3-dev 
+            sudo apt install -y autoconf bison libyaml-dev libgdbm-dev libncurses5-dev automake libtool
+            sudo apt install -y libffi-dev nodejs npm libxml2-dev libxslt1-dev
+            
+            # Install rvm
+            echo "installing rvm and ruby..."
+            if ! command -v rvm &> /dev/null; then
+              gpg --keyserver keyserver.ubuntu.com --recv-keys 409B6B1796C275462A1703113804BB82D39DC0E3 7D2BAF1CF37B13E2069D6956105BD0E739499BDB
+              curl -sSL https://get.rvm.io | bash -s stable
+            fi
+            
+            # Check ruby installation
+            source ~/.rvm/scripts/rvm
+            rvm get stable --auto-dotfiles
+            rvm reload
+            
+            # Check if Ruby 3.3.5 is already installed
+            if ! rvm list | grep -q '3.3.5'; then
+              echo "Ruby 3.3.5 not found. Installing it..."
+              rvm install 3.3.5
+            else
+              echo "Ruby 3.3.5 is already installed."
+            fi
+            
+            # Use Ruby 3.3.5 and set as default
+            rvm use 3.3.5 --default
+            ruby -v
+            
+            # set the master key
+            echo "setting up master key..."
+            echo "${RAILS_MASTER_KEY}" > config/master.key
+            chmod 600 config/master.key
+            
+            # create needed directories
+            mkdir -p db storage log tmp/pids
+            chmod -R 755 .
+            
+            # install gems with rvm ruby
+            echo "installing project dependencies..."
+            gem install bundler
+            bundle install --jobs=4 --retry=3 || (echo "Bundle install failed, trying again..." && bundle install)
+            
+            # run migrations
+            echo "running database migrations"
+            RAILS_ENV=production bundle exec rails db:migrate || echo "Migration failed but continuing"
+            
+            # create systemd service file highscores-api.service
+            echo "creating systemd service file..."
+            sudo rm -f /etc/systemd/system/highscores-api.service
+            sudo sh -c 'echo "[Unit]" > /etc/systemd/system/highscores-api.service'
+            sudo sh -c 'echo "Description=Highscores Rails API" >> /etc/systemd/system/highscores-api.service'
+            sudo sh -c 'echo "After=network.target" >> /etc/systemd/system/highscores-api.service'
+            sudo sh -c 'echo "" >> /etc/systemd/system/highscores-api.service'
+            sudo sh -c 'echo "[Service]" >> /etc/systemd/system/highscores-api.service'
+            sudo sh -c 'echo "Type=simple" >> /etc/systemd/system/highscores-api.service'
+            sudo sh -c 'echo "User='$USER'" >> /etc/systemd/system/highscores-api.service'
+            sudo sh -c 'echo "WorkingDirectory='$PWD'" >> /etc/systemd/system/highscores-api.service'
+            sudo sh -c 'echo "ExecStart=/bin/bash -l -c '\''source ~/.rvm/scripts/rvm && bundle exec rails server -e production -p 3000 -b 0.0.0.0'\''" >> /etc/systemd/system/highscores-api.service'
+            sudo sh -c 'echo "Restart=on-failure" >> /etc/systemd/system/highscores-api.service'
+            sudo sh -c 'echo "Environment=RAILS_ENV=production" >> /etc/systemd/system/highscores-api.service'
+            sudo sh -c 'echo "Environment=RAILS_MASTER_KEY='${RAILS_MASTER_KEY}'" >> /etc/systemd/system/highscores-api.service'
+            sudo sh -c 'echo "Environment=RAILS_SERVE_STATIC_FILES=true" >> /etc/systemd/system/highscores-api.service'
+            sudo sh -c 'echo "StandardOutput=append:/var/log/highscores-api.log" >> /etc/systemd/system/highscores-api.service'
+            sudo sh -c 'echo "StandardError=append:/var/log/highscores-api.error.log" >> /etc/systemd/system/highscores-api.service'
+            sudo sh -c 'echo "" >> /etc/systemd/system/highscores-api.service'
+            sudo sh -c 'echo "[Install]" >> /etc/systemd/system/highscores-api.service'
+            sudo sh -c 'echo "WantedBy=multi-user.target" >> /etc/systemd/system/highscores-api.service'
+            
+            # create log files
+            sudo touch /var/log/highscores-api.log
+            sudo touch /var/log/highscores-api.error.log
+            sudo chown $USER:$USER /var/log/highscores-api.*
+            
+            echo "Setting up nginx..."
+            sudo apt install -y nginx
+            
+            # create nginx config file
+            sudo rm -f /etc/nginx/sites-available/highscores-api
+            sudo sh -c 'echo "server {" > /etc/nginx/sites-available/highscores-api'
+            sudo sh -c 'echo "    listen 80;" >> /etc/nginx/sites-available/highscores-api'
+            sudo sh -c 'echo "    server_name _;" >> /etc/nginx/sites-available/highscores-api'
+            sudo sh -c 'echo "" >> /etc/nginx/sites-available/highscores-api'
+            sudo sh -c 'echo "    location / {" >> /etc/nginx/sites-available/highscores-api'
+            sudo sh -c 'echo "        proxy_pass http://localhost:3000;" >> /etc/nginx/sites-available/highscores-api'
+            sudo sh -c 'echo "        proxy_set_header X-Real-IP \$remote_addr;" >> /etc/nginx/sites-available/highscores-api'
+            sudo sh -c 'echo "        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;" >> /etc/nginx/sites-available/highscores-api'
+            sudo sh -c 'echo "        proxy_set_header X-Forwarded-Proto \$scheme;" >> /etc/nginx/sites-available/highscores-api'
+            sudo sh -c 'echo "    }" >> /etc/nginx/sites-available/highscores-api'
+            sudo sh -c 'echo "}" >> /etc/nginx/sites-available/highscores-api'
+            
+            sudo ln -sf /etc/nginx/sites-available/highscores-api /etc/nginx/sites-enabled/
+            sudo rm -f /etc/nginx/sites-enabled/default
+            sudo systemctl restart nginx
+            
+            # reload systemd
+            echo "reloading systemd..."
+            sudo systemctl daemon-reload
+            
+            # enable and start the service
+            echo "enabling service..."
+            sudo systemctl enable highscores-api
+            
+            echo "starting service.."
+            sudo systemctl restart highscores-api
+            sleep 5
+            sudo systemctl status highscores-api || true
+            
+            # if service fails, try direct start
+            if ! sudo systemctl is-active --quiet highscores-api; then
+              echo "service failed to start, trying manual start..."
+              cd $PWD
+              source ~/.rvm/scripts/rvm
+              rvm use 3.3.5
+              RAILS_ENV=production RAILS_MASTER_KEY=${RAILS_MASTER_KEY} nohup bundle exec rails server -p 3000 -b 0.0.0.0 > ~/rails.log 2>&1 &
+              echo "server started in background"
+            fi
+            
+            echo "deployment process completed"
+          ENDSSH

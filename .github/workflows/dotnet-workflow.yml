@@ -1,0 +1,60 @@
+name: .NET Core CI/CD
+
+on:
+  push:
+    branches: [ "main" ]
+    paths:
+      - 'local-app/**'
+      - '.github/workflows/dotnet-workflow.yml'
+  pull_request:
+    branches: [ "main" ]
+    paths:
+      - 'local-app/**'
+
+jobs:
+  build-and-test-dotnet:
+    runs-on: windows-latest
+
+    env:
+      Solution_Name: local-app/TerminalSolitaire.sln
+      Project_Path: local-app/TerminalSolitaire.csproj
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    # Install the .NET Core workload
+    - name: Install .NET Core
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: 8.0.x
+
+    # Add MSBuild to the PATH
+    - name: Setup MSBuild.exe
+      uses: microsoft/setup-msbuild@v2
+    
+    - name: Debug - List Files
+      run: ls -R local-app
+      
+    - name: Restore Dependencies
+      run: dotnet restore ${{ env.Solution_Name }}
+
+    - name: Build Solution
+      run: dotnet build ${{ env.Solution_Name }} --configuration Release --no-restore
+      
+    # Execute all unit tests in the solution
+    - name: Execute unit tests
+      run: dotnet test ${{ env.Solution_Name }} --configuration Release --no-build
+      
+    # Create the self-contained executable for Windows
+    - name: Publish Windows x86
+      run: dotnet publish ${{ env.Project_Path }} -c Release -r win-x86 --self-contained true -p:PublishSingleFile=true -p:PublishTrimmed=true -o ./publish/win-x86
+      
+    # Archive the build artifacts
+    - name: Archive artifacts
+      uses: actions/upload-artifact@v3
+      with:
+        name: solitaire-game-windows
+        path: ./publish/win-x86
